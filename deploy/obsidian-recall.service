@@ -1,0 +1,17 @@
+[Unit]
+Description=Obsidian Recall server
+After=network.target
+
+[Service]
+Type=simple
+User=zhuhui
+Group=zhuhui
+WorkingDirectory=/opt/obsidian-recall
+EnvironmentFile=/opt/obsidian-recall/.env
+ExecStart=/opt/obsidian-recall/bin/obsidian-recall-server
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+

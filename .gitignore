@@ -1,0 +1,6 @@
+.env
+*.db
+*.db-shm
+*.db-wal
+coverage.out
+deploy/obsidian-recall-server-linux-amd64
