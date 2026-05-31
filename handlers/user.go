@@ -8,8 +8,6 @@ import (
 	"time"
 )
 
-const summaryPromptDisabledSentinel = "__SUMMARY_DISABLED__"
-
 type userSettingsResponse struct {
 	PushTime          string   `json:"push_time"`
 	Timezone          string   `json:"timezone"`
@@ -209,7 +207,7 @@ func (api *API) putUserSettings(w http.ResponseWriter, r *http.Request) {
 			daily_push_count = excluded.daily_push_count,
 			summary_prompt = excluded.summary_prompt,
 			updated_at = excluded.updated_at
-	`, current.UserID, req.DailyPushCount, summaryPromptDisabledSentinel, api.now().Format(time.RFC3339))
+	`, current.UserID, req.DailyPushCount, "", api.now().Format(time.RFC3339))
 	enableRSS := 0
 	if req.EnableRSS {
 		enableRSS = 1

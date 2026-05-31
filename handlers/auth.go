@@ -288,17 +288,17 @@ func (api *API) logout(w http.ResponseWriter, r *http.Request) {
 func initializeUserDefaults(ctx context.Context, tx *sql.Tx, userID, now string) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO user_settings (
-			user_id, push_time, timezone, ai_model, sync_mode,
+			user_id, push_time, timezone, sync_mode,
 			excluded_folders, min_note_length, max_note_age_days,
 			storage_quota_bytes, updated_at
-		) VALUES (?, '08:00', 'Asia/Shanghai', 'deepseek-chat', 'local', '[]', 50, 0, 104857600, ?)
+		) VALUES (?, '08:00', 'Asia/Shanghai', 'local', '[]', 50, 0, 104857600, ?)
 	`, userID, now); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO user_prompt_settings (user_id, daily_push_count, summary_prompt, updated_at)
-		VALUES (?, 1, ?, ?)
-	`, userID, summaryPromptDisabledSentinel, now); err != nil {
+		VALUES (?, 1, '', ?)
+	`, userID, now); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `

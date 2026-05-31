@@ -32,7 +32,7 @@ RSS Feed                    Cubox API
 
 基础表：
 
-- `users`, `user_tokens`, `user_settings`, `notes`, `ai_usage`
+- `users`, `user_tokens`, `user_settings`, `notes`
 
 回顾与推送：
 
