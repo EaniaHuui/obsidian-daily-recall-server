@@ -51,23 +51,19 @@ RSS Feed                    Cubox API
 - [server/db/migrations/002_recall_queue.sql](../server/db/migrations/002_recall_queue.sql)
 - [server/db/migrations/003_channel_settings.sql](../server/db/migrations/003_channel_settings.sql)
 
-## 4. 摘要开关设计
+## 4. 内容生成规则
 
-用户侧新增 `enable_summary`（设置接口字段）：
-
-- `true`：长内容触发 AI 摘要
-- `false`：不调用 AI，直接正文截断
-
-兼容实现说明：
-
-- 当前数据库未新增字段，服务端通过 `user_prompt_settings.summary_prompt` 的保留标记值表示“关闭摘要”状态（对外 API 仍返回显式 `enable_summary`）。
+- 摘要功能已经移除，不再作为当前产品功能的一部分。
+- 服务端推送时直接使用正文内容。
+- `user_prompt_settings.daily_push_count` 继续保留，用于每日条数配置。
+- `user_prompt_settings.summary_prompt` 作为兼容旧数据字段保留，但不再参与业务逻辑。
 
 ## 5. 详情页渲染规则
 
 RSS 详情页由服务端直接输出纯 HTML：
 
-- 顶部：摘要（Markdown 渲染后 HTML）
-- 下方：全文（Markdown 渲染后 HTML）
+- 直接渲染完整正文（Markdown 渲染后 HTML）
+- 去掉摘要区块
 - 去掉折叠组件（无 `details/summary`）
 
 实现位置：
@@ -110,8 +106,8 @@ Worker 每 30 秒 tick：
 1. 按用户时区判断是否到达（或超过）`push_time`
 2. 处理 `scheduled_recalls` 中 `scheduled_date <= today` 且 `status=queued`
 3. 对每条记录执行：
-   - 读取用户设置（通道开关、摘要开关）
-   - 生成摘要或正文截断
+   - 读取用户设置（通道开关、每日条数）
+   - 生成列表预览文本
    - 分发到开启通道（RSS/Cubox）
    - 更新 `done/failed`
 

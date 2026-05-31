@@ -8,7 +8,6 @@
 - 定时调度与发送
 - RSS 私有订阅输出
 - Cubox API 推送
-- 可选 AI 摘要
 
 ## 技术栈
 
@@ -54,7 +53,7 @@ curl http://127.0.0.1:8080/healthz
 
 详细设计与部署说明见：
 
-- `docs/technical-design.md`
+- `../docs/technical-design.md`
 
 ## 安全说明
 

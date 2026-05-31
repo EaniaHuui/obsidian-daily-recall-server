@@ -68,17 +68,12 @@ type queueStatusResponse struct {
 }
 
 type pushSettings struct {
-	AIKey         string
-	AIModel       string
-	AIBaseURL     string
-	DailyCount    int
-	EnableSummary bool
-	SummaryPrompt string
-	EnableRSS     bool
-	EnableCubox   bool
-	CuboxAPIURL   string
-	CuboxFolder   string
-	CuboxTags     []string
+	DailyCount  int
+	EnableRSS   bool
+	EnableCubox bool
+	CuboxAPIURL string
+	CuboxFolder string
+	CuboxTags   []string
 }
 
 func (api *API) queueLocalRecalls(w http.ResponseWriter, r *http.Request) {
@@ -291,7 +286,14 @@ func (api *API) pushHistoryDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "push_history_query_failed", "failed to load push history detail")
 		return
 	}
-	_ = api.store.SQL.QueryRowContext(ctx, `SELECT COALESCE(content,'') FROM notes WHERE id = ? AND user_id = ?`, noteID, current.UserID).Scan(&response.Content)
+	_ = api.store.SQL.QueryRowContext(ctx, `
+		SELECT COALESCE(content,'')
+		FROM notes
+		WHERE user_id = ?
+		  AND (id = ? OR path = ?)
+		ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END
+		LIMIT 1
+	`, current.UserID, noteID, response.NotePath, noteID).Scan(&response.Content)
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -418,14 +420,8 @@ func (api *API) processSingleRecall(ctx context.Context, userID, scheduledID, pa
 		return err
 	}
 
-	summary := truncateRunes(content, 500)
-	if settings.EnableSummary && runeCount(content) >= 800 {
-		raw, _, sumErr := api.summarizeForUser(ctx, userID, settings, title, path, content)
-		if sumErr == nil && strings.TrimSpace(raw) != "" {
-			summary = raw
-		}
-	}
-	_, _ = api.store.SQL.ExecContext(ctx, `UPDATE scheduled_recalls SET status='pushing', summary=?, updated_at=? WHERE id=?`, summary, now, scheduledID)
+	preview := truncateRunes(content, 500)
+	_, _ = api.store.SQL.ExecContext(ctx, `UPDATE scheduled_recalls SET status='pushing', summary=?, updated_at=? WHERE id=?`, preview, now, scheduledID)
 
 	noteID, _ := randomHex(16)
 	_, _ = api.store.SQL.ExecContext(ctx, `
@@ -449,14 +445,14 @@ func (api *API) processSingleRecall(ctx context.Context, userID, scheduledID, pa
 		if _, err = api.store.SQL.ExecContext(ctx, `
 			INSERT INTO push_history (id, user_id, note_id, note_path, note_title, summary, pushed_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, historyID, userID, noteID, path, title, summary, now); err != nil {
+		`, historyID, userID, noteID, path, title, preview, now); err != nil {
 			failedReasons = append(failedReasons, "rss_history_save_failed")
 		} else {
 			successCount++
 		}
 	}
 	if settings.EnableCubox {
-		if err := api.pushToCubox(ctx, settings, title, path, summary, content); err != nil {
+		if err := api.pushToCubox(ctx, settings, title, path, content); err != nil {
 			failedReasons = append(failedReasons, "cubox_push_failed:"+err.Error())
 		} else {
 			successCount++
@@ -498,21 +494,8 @@ func maxInt(a, b int) int {
 
 func (api *API) loadPushSettings(ctx context.Context, userID string) (pushSettings, error) {
 	settings := pushSettings{}
-	var aiEnc string
-	if err := api.store.SQL.QueryRowContext(ctx, `
-		SELECT COALESCE(ai_key_enc,''), COALESCE(ai_model,'deepseek-chat'), COALESCE(ai_base_url,'')
-		FROM user_settings WHERE user_id = ?
-	`, userID).Scan(&aiEnc, &settings.AIModel, &settings.AIBaseURL); err != nil {
-		return settings, err
-	}
-	if aiEnc != "" {
-		if aiKey, err := api.secretBox.DecryptString(aiEnc); err == nil {
-			settings.AIKey = strings.TrimSpace(aiKey)
-		}
-	}
 	var daily int
-	var prompt string
-	if err := api.store.SQL.QueryRowContext(ctx, `SELECT COALESCE(daily_push_count,1), COALESCE(summary_prompt,'') FROM user_prompt_settings WHERE user_id = ?`, userID).Scan(&daily, &prompt); err != nil {
+	if err := api.store.SQL.QueryRowContext(ctx, `SELECT COALESCE(daily_push_count,1) FROM user_prompt_settings WHERE user_id = ?`, userID).Scan(&daily); err != nil {
 		if err != sql.ErrNoRows {
 			return settings, err
 		}
@@ -525,13 +508,6 @@ func (api *API) loadPushSettings(ctx context.Context, userID string) (pushSettin
 		daily = 20
 	}
 	settings.DailyCount = daily
-	prompt = strings.TrimSpace(prompt)
-	settings.EnableSummary = prompt != summaryPromptDisabledSentinel
-	if settings.EnableSummary {
-		settings.SummaryPrompt = prompt
-	} else {
-		settings.SummaryPrompt = ""
-	}
 	settings.EnableRSS = true
 	var enableRSSInt, enableCuboxInt int
 	var cuboxEnc, cuboxTagsJSON string
@@ -561,20 +537,16 @@ func (api *API) loadPushSettings(ctx context.Context, userID string) (pushSettin
 	return settings, nil
 }
 
-func (api *API) pushToCubox(ctx context.Context, settings pushSettings, title, path, summary, content string) error {
+func (api *API) pushToCubox(ctx context.Context, settings pushSettings, title, path, content string) error {
 	apiURL := strings.TrimSpace(settings.CuboxAPIURL)
 	if apiURL == "" {
 		return fmt.Errorf("missing cubox api url")
 	}
 
-	memoContent := strings.TrimSpace(summary)
-	if memoContent == "" {
-		memoContent = truncateRunes(strings.TrimSpace(content), 3000)
-	}
 	requestBody := map[string]any{
 		"type":        "memo",
 		"title":       strings.TrimSpace(title),
-		"content":     memoContent,
+		"content":     truncateRunes(strings.TrimSpace(content), 3000),
 		"description": strings.TrimSpace(path),
 	}
 	if folder := strings.TrimSpace(settings.CuboxFolder); folder != "" {
@@ -604,126 +576,6 @@ func (api *API) pushToCubox(ctx context.Context, settings pushSettings, title, p
 		return fmt.Errorf("cubox status %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
 	}
 	return nil
-}
-
-func (api *API) summarizeForUser(ctx context.Context, userID string, settings pushSettings, title, path, content string) (string, bool, error) {
-	aiKey := strings.TrimSpace(settings.AIKey)
-	baseURL := strings.TrimSpace(settings.AIBaseURL)
-	model := strings.TrimSpace(settings.AIModel)
-	usedDefaultKey := false
-	if model == "" {
-		model = strings.TrimSpace(api.cfg.DefaultAIModel)
-	}
-	if aiKey == "" {
-		aiKey = strings.TrimSpace(api.cfg.DefaultAIKey)
-		baseURL = strings.TrimSpace(api.cfg.DefaultAIBaseURL)
-		usedDefaultKey = true
-	}
-	if aiKey == "" || model == "" {
-		return "", false, fmt.Errorf("no ai provider configured")
-	}
-	if baseURL == "" {
-		baseURL = strings.TrimSpace(api.cfg.DefaultAIBaseURL)
-	}
-	if usedDefaultKey {
-		allowed, err := api.consumeDefaultAILimit(ctx, userID)
-		if err != nil || !allowed {
-			return "", false, fmt.Errorf("daily ai quota exceeded")
-		}
-	}
-	trimmed := []rune(strings.TrimSpace(content))
-	if len(trimmed) > 12000 {
-		content = string(trimmed[:12000])
-	}
-	prompt := strings.TrimSpace(settings.SummaryPrompt)
-	if prompt == "" {
-		prompt = "请用150-200字摘要以下笔记内容，提炼核心观点，保留关键信息，语言简洁清晰。\\n\\n<note>\\n{content}\\n</note>"
-	}
-	prompt = strings.ReplaceAll(prompt, "{title}", title)
-	prompt = strings.ReplaceAll(prompt, "{path}", path)
-	prompt = strings.ReplaceAll(prompt, "{content}", content)
-	summary, err := callOpenAISummary(ctx, baseURL, aiKey, model, prompt)
-	if err != nil {
-		return "", false, err
-	}
-	return truncateRunes(summary, 200), true, nil
-}
-
-func (api *API) consumeDefaultAILimit(ctx context.Context, userID string) (bool, error) {
-	limit, err := strconv.Atoi(strings.TrimSpace(api.cfg.DefaultAIDailyLimit))
-	if err != nil || limit <= 0 {
-		limit = 1
-	}
-	today := api.now().Format("2006-01-02")
-	tx, err := api.store.SQL.BeginTx(ctx, nil)
-	if err != nil {
-		return false, fmt.Errorf("failed to open ai usage transaction")
-	}
-	defer func() { _ = tx.Rollback() }()
-	var callCount int
-	scanErr := tx.QueryRowContext(ctx, `SELECT call_count FROM ai_usage WHERE user_id = ? AND date = ?`, userID, today).Scan(&callCount)
-	switch {
-	case scanErr == nil:
-	case scanErr == sql.ErrNoRows:
-		callCount = 0
-	default:
-		return false, fmt.Errorf("failed to check ai usage")
-	}
-	if callCount >= limit {
-		return false, nil
-	}
-	if scanErr == sql.ErrNoRows {
-		usageID, _ := randomHex(16)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO ai_usage (id, user_id, date, call_count) VALUES (?, ?, ?, 1)`, usageID, userID, today); err != nil {
-			return false, fmt.Errorf("failed to create ai usage row")
-		}
-	} else {
-		if _, err := tx.ExecContext(ctx, `UPDATE ai_usage SET call_count = call_count + 1 WHERE user_id = ? AND date = ?`, userID, today); err != nil {
-			return false, fmt.Errorf("failed to update ai usage")
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("failed to save ai usage")
-	}
-	return true, nil
-}
-
-func callOpenAISummary(ctx context.Context, baseURL, apiKey, model, prompt string) (string, error) {
-	requestBody := map[string]any{"model": model, "messages": []map[string]string{{"role": "system", "content": "你是一个笔记摘要助手。请对用户提供的笔记进行简洁摘要。"}, {"role": "user", "content": prompt}}, "temperature": 0.2}
-	bodyBytes, err := json.Marshal(requestBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to encode ai request")
-	}
-	requestURL := strings.TrimRight(strings.TrimSpace(baseURL), "/") + "/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return "", fmt.Errorf("failed to build ai request")
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to call ai provider: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("ai provider returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
-	}
-	var payload struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", fmt.Errorf("failed to decode ai response")
-	}
-	if len(payload.Choices) == 0 {
-		return "", fmt.Errorf("ai provider returned no choices")
-	}
-	return strings.TrimSpace(payload.Choices[0].Message.Content), nil
 }
 
 func truncateRunes(value string, limit int) string {

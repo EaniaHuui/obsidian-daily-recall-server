@@ -13,9 +13,6 @@ const summaryPromptDisabledSentinel = "__SUMMARY_DISABLED__"
 type userSettingsResponse struct {
 	PushTime          string   `json:"push_time"`
 	Timezone          string   `json:"timezone"`
-	AIModel           string   `json:"ai_model"`
-	AIKey             string   `json:"ai_key"`
-	AIBaseURL         string   `json:"ai_base_url"`
 	EnableRSS         bool     `json:"enable_rss"`
 	EnableCubox       bool     `json:"enable_cubox"`
 	CuboxAPIURL       string   `json:"cubox_api_url"`
@@ -23,8 +20,6 @@ type userSettingsResponse struct {
 	CuboxTags         []string `json:"cubox_tags"`
 	SyncMode          string   `json:"sync_mode"`
 	DailyPushCount    int      `json:"daily_push_count"`
-	EnableSummary     bool     `json:"enable_summary"`
-	SummaryPrompt     string   `json:"summary_prompt"`
 	ExcludedFolders   []string `json:"excluded_folders"`
 	MinNoteLength     int      `json:"min_note_length"`
 	StorageUsedBytes  int64    `json:"storage_used_bytes"`
@@ -34,9 +29,6 @@ type userSettingsResponse struct {
 type userSettingsUpdateRequest struct {
 	PushTime        string   `json:"push_time"`
 	Timezone        string   `json:"timezone"`
-	AIModel         string   `json:"ai_model"`
-	AIKey           string   `json:"ai_key"`
-	AIBaseURL       string   `json:"ai_base_url"`
 	EnableRSS       bool     `json:"enable_rss"`
 	EnableCubox     bool     `json:"enable_cubox"`
 	CuboxAPIURL     string   `json:"cubox_api_url"`
@@ -44,8 +36,6 @@ type userSettingsUpdateRequest struct {
 	CuboxTags       []string `json:"cubox_tags"`
 	SyncMode        string   `json:"sync_mode"`
 	DailyPushCount  int      `json:"daily_push_count"`
-	EnableSummary   *bool    `json:"enable_summary"`
-	SummaryPrompt   string   `json:"summary_prompt"`
 	ExcludedFolders []string `json:"excluded_folders"`
 	MinNoteLength   int      `json:"min_note_length"`
 }
@@ -60,7 +50,7 @@ func (api *API) getUserSettings(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	var aiEnc, cuboxURLenc, cuboxTagsJSON string
+	var cuboxURLenc, cuboxTagsJSON string
 	enableRSSInt := 1
 	enableCuboxInt := 0
 	var response userSettingsResponse
@@ -69,9 +59,6 @@ func (api *API) getUserSettings(w http.ResponseWriter, r *http.Request) {
 		SELECT
 			COALESCE(push_time, '08:00'),
 			COALESCE(timezone, 'Asia/Shanghai'),
-			COALESCE(ai_model, 'deepseek-chat'),
-			COALESCE(ai_key_enc, ''),
-			COALESCE(ai_base_url, ''),
 			COALESCE(sync_mode, 'local'),
 			COALESCE(excluded_folders, '[]'),
 			COALESCE(min_note_length, 50),
@@ -82,9 +69,6 @@ func (api *API) getUserSettings(w http.ResponseWriter, r *http.Request) {
 	if err := row.Scan(
 		&response.PushTime,
 		&response.Timezone,
-		&response.AIModel,
-		&aiEnc,
-		&response.AIBaseURL,
 		&response.SyncMode,
 		&excludedJSON,
 		&response.MinNoteLength,
@@ -95,9 +79,6 @@ func (api *API) getUserSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.ExcludedFolders, _ = decodeStringSlice(excludedJSON)
-	if aiPlain, err := api.secretBox.DecryptString(aiEnc); err == nil {
-		response.AIKey = maskSecret(aiPlain)
-	}
 	cuboxTagsJSON = "[]"
 	_ = api.store.SQL.QueryRowContext(ctx, `
 		SELECT
@@ -118,16 +99,10 @@ func (api *API) getUserSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	response.CuboxTags, _ = decodeStringSlice(cuboxTagsJSON)
 	_ = api.store.SQL.QueryRowContext(ctx, `
-		SELECT COALESCE(daily_push_count, 1), COALESCE(summary_prompt, '')
+		SELECT COALESCE(daily_push_count, 1)
 		FROM user_prompt_settings
 		WHERE user_id = ?
-	`, current.UserID).Scan(&response.DailyPushCount, &response.SummaryPrompt)
-	if strings.TrimSpace(response.SummaryPrompt) == summaryPromptDisabledSentinel {
-		response.EnableSummary = false
-		response.SummaryPrompt = ""
-	} else {
-		response.EnableSummary = true
-	}
+	`, current.UserID).Scan(&response.DailyPushCount)
 	if response.DailyPushCount < 1 {
 		response.DailyPushCount = 1
 	}
@@ -167,9 +142,6 @@ func (api *API) putUserSettings(w http.ResponseWriter, r *http.Request) {
 	if req.Timezone == "" {
 		req.Timezone = "Asia/Shanghai"
 	}
-	if req.AIModel == "" {
-		req.AIModel = "deepseek-chat"
-	}
 	req.SyncMode = "local"
 	if req.MinNoteLength <= 0 {
 		req.MinNoteLength = 50
@@ -187,11 +159,6 @@ func (api *API) putUserSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	aiEnc, err := api.secretBox.EncryptString(strings.TrimSpace(req.AIKey))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "ai_encrypt_failed", "failed to encrypt ai key")
-		return
-	}
 	cuboxTagsJSON, err := encodeStringSlice(req.CuboxTags)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_cubox_tags", "failed to encode cubox tags")
@@ -200,18 +167,6 @@ func (api *API) putUserSettings(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-
-	var aiEncStored string
-	if isMaskedSecret(req.AIKey) {
-		_ = api.store.SQL.QueryRowContext(ctx, `
-			SELECT COALESCE(ai_key_enc, '')
-			FROM user_settings
-			WHERE user_id = ?
-		`, current.UserID).Scan(&aiEncStored)
-	}
-	if aiEncStored == "" {
-		aiEncStored = aiEnc
-	}
 
 	var cuboxURLenc string
 	if isMaskedSecret(req.CuboxAPIURL) {
@@ -231,33 +186,21 @@ func (api *API) putUserSettings(w http.ResponseWriter, r *http.Request) {
 
 	_, err = api.store.SQL.ExecContext(ctx, `
 		INSERT INTO user_settings (
-			user_id, push_time, timezone,
-			ai_key_enc, ai_model, ai_base_url, sync_mode,
+			user_id, push_time, timezone, sync_mode,
 			excluded_folders, min_note_length, max_note_age_days,
 			storage_quota_bytes, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 104857600, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, 0, 104857600, ?)
 		ON CONFLICT(user_id) DO UPDATE SET
 			push_time = excluded.push_time,
 			timezone = excluded.timezone,
-			ai_key_enc = excluded.ai_key_enc,
-			ai_model = excluded.ai_model,
-			ai_base_url = excluded.ai_base_url,
 			sync_mode = excluded.sync_mode,
 			excluded_folders = excluded.excluded_folders,
 			min_note_length = excluded.min_note_length,
 			updated_at = excluded.updated_at
-	`, current.UserID, req.PushTime, req.Timezone, aiEncStored, req.AIModel, strings.TrimSpace(req.AIBaseURL), req.SyncMode, excludedJSON, req.MinNoteLength, api.now().Format(time.RFC3339))
+	`, current.UserID, req.PushTime, req.Timezone, req.SyncMode, excludedJSON, req.MinNoteLength, api.now().Format(time.RFC3339))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "settings_save_failed", "failed to save settings")
 		return
-	}
-	enableSummary := true
-	if req.EnableSummary != nil {
-		enableSummary = *req.EnableSummary
-	}
-	storedPrompt := strings.TrimSpace(req.SummaryPrompt)
-	if !enableSummary {
-		storedPrompt = summaryPromptDisabledSentinel
 	}
 	_, _ = api.store.SQL.ExecContext(ctx, `
 		INSERT INTO user_prompt_settings (user_id, daily_push_count, summary_prompt, updated_at)
@@ -266,7 +209,7 @@ func (api *API) putUserSettings(w http.ResponseWriter, r *http.Request) {
 			daily_push_count = excluded.daily_push_count,
 			summary_prompt = excluded.summary_prompt,
 			updated_at = excluded.updated_at
-	`, current.UserID, req.DailyPushCount, storedPrompt, api.now().Format(time.RFC3339))
+	`, current.UserID, req.DailyPushCount, summaryPromptDisabledSentinel, api.now().Format(time.RFC3339))
 	enableRSS := 0
 	if req.EnableRSS {
 		enableRSS = 1

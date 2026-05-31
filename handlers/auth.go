@@ -297,8 +297,8 @@ func initializeUserDefaults(ctx context.Context, tx *sql.Tx, userID, now string)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO user_prompt_settings (user_id, daily_push_count, summary_prompt, updated_at)
-		VALUES (?, 1, '', ?)
-	`, userID, now); err != nil {
+		VALUES (?, 1, ?, ?)
+	`, userID, summaryPromptDisabledSentinel, now); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `

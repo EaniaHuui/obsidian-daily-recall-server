@@ -300,16 +300,15 @@ func (api *API) publicRSSItem(w http.ResponseWriter, r *http.Request) {
 	_ = api.store.SQL.QueryRowContext(ctx, `
 		SELECT COALESCE(content, '')
 		FROM notes
-		WHERE id = ?
-		  AND user_id = ?
-	`, noteID, userID).Scan(&rawContent)
+		WHERE user_id = ?
+		  AND (id = ? OR path = ?)
+		ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END
+		LIMIT 1
+	`, userID, noteID, view.Path, noteID).Scan(&rawContent)
 
 	content := strings.TrimSpace(rawContent)
-	if content == "" {
-		content = view.Summary
-	}
-	view.Summary = html.UnescapeString(view.Summary)
-	view.SummaryHTML = renderMarkdownHTML(view.Summary)
+	view.Summary = ""
+	view.SummaryHTML = ""
 	view.ContentHTML = renderMarkdownHTML(content)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -375,8 +374,6 @@ func (api *API) publicRSSItem(w http.ResponseWriter, r *http.Request) {
     <article class="card">
       <h1 class="title">{{.Title}}</h1>
       <div class="meta">{{.Path}} · {{.PushedAt}}</div>
-      {{if .Summary}}<h3 style="margin:0 0 8px;font-size:15px;color:#334155;">摘要</h3><div class="summary">{{.SummaryHTML}}</div>{{end}}
-      <h3 style="margin:0 0 10px;font-size:15px;color:#334155;">全文</h3>
       <div class="md">{{.ContentHTML}}</div>
     </article>
   </div>
