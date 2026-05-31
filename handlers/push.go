@@ -439,20 +439,29 @@ func (api *API) processSingleRecall(ctx context.Context, userID, scheduledID, pa
 	`, noteID, userID, path, title, content, len([]byte(content)), contentHash, now, now)
 
 	successCount := 0
-	failedReasons := make([]string, 0, 2)
-	if settings.EnableRSS {
-		historyID, _ := randomHex(16)
+	failedReasons := make([]string, 0, 3)
+	historyID := ""
+	if settings.EnableRSS || settings.EnableCubox {
+		historyID, _ = randomHex(16)
 		if _, err = api.store.SQL.ExecContext(ctx, `
 			INSERT INTO push_history (id, user_id, note_id, note_path, note_title, summary, pushed_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
 		`, historyID, userID, noteID, path, title, preview, now); err != nil {
-			failedReasons = append(failedReasons, "rss_history_save_failed")
+			failedReasons = append(failedReasons, "push_history_save_failed")
+			historyID = ""
+		}
+	}
+	if settings.EnableRSS {
+		if historyID == "" {
+			failedReasons = append(failedReasons, "rss_history_missing")
 		} else {
 			successCount++
 		}
 	}
 	if settings.EnableCubox {
-		if err := api.pushToCubox(ctx, settings, title, path, content); err != nil {
+		if historyID == "" {
+			failedReasons = append(failedReasons, "cubox_history_missing")
+		} else if err := api.pushToCubox(ctx, userID, settings, historyID, title, path); err != nil {
 			failedReasons = append(failedReasons, "cubox_push_failed:"+err.Error())
 		} else {
 			successCount++
@@ -537,16 +546,21 @@ func (api *API) loadPushSettings(ctx context.Context, userID string) (pushSettin
 	return settings, nil
 }
 
-func (api *API) pushToCubox(ctx context.Context, settings pushSettings, title, path, content string) error {
+func (api *API) pushToCubox(ctx context.Context, userID string, settings pushSettings, historyID, title, path string) error {
 	apiURL := strings.TrimSpace(settings.CuboxAPIURL)
 	if apiURL == "" {
 		return fmt.Errorf("missing cubox api url")
 	}
+	token, err := api.ensureUserRSSFeedToken(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("prepare detail token: %w", err)
+	}
+	itemURL := api.rssItemURL(token, historyID)
 
 	requestBody := map[string]any{
-		"type":        "memo",
+		"type":        "url",
 		"title":       strings.TrimSpace(title),
-		"content":     truncateRunes(strings.TrimSpace(content), 3000),
+		"content":     itemURL,
 		"description": strings.TrimSpace(path),
 	}
 	if folder := strings.TrimSpace(settings.CuboxFolder); folder != "" {

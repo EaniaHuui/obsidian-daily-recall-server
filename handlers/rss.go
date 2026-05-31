@@ -278,10 +278,6 @@ func (api *API) publicRSSItem(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if !api.isRSSEnabled(ctx, userID) {
-		http.NotFound(w, r)
-		return
-	}
 
 	var noteID string
 	var view rssPublicItemView
